@@ -27,8 +27,8 @@ pub fn version() -> &'static str {
 }
 
 pub type Result<T> = std::result::Result<T, AudioError>;
-pub type AudioStream = Pin<Box<dyn Stream<Item = Result<AudioFrame>> + Send>>;
-pub type AudioSink = Pin<Box<dyn Sink<AudioFrame, Error = AudioError> + Send>>;
+pub type AudioStream = Pin<Box<dyn Stream<Item = Result<AudioSlice>> + Send>>;
+pub type AudioSink = Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>;
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES: usize = 960;
@@ -112,7 +112,7 @@ impl AudioDecoder {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AudioFrame {
+pub struct AudioSlice {
     pub samples: Vec<f32>,
     pub channels: u16,
     pub sample_rate: u32,
@@ -355,7 +355,7 @@ impl FileAudioStream {
         })
     }
 
-    fn next_frame(&mut self) -> Option<Result<AudioFrame>> {
+    fn next_frame(&mut self) -> Option<Result<AudioSlice>> {
         if self.done {
             return None;
         }
@@ -405,7 +405,7 @@ impl FileAudioStream {
             let mut sample_buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
             sample_buffer.copy_interleaved_ref(decoded);
 
-            return Some(Ok(AudioFrame {
+            return Some(Ok(AudioSlice {
                 samples: sample_buffer.samples().to_vec(),
                 channels,
                 sample_rate,
@@ -415,7 +415,7 @@ impl FileAudioStream {
 }
 
 impl Stream for FileAudioStream {
-    type Item = Result<AudioFrame>;
+    type Item = Result<AudioSlice>;
 
     fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.next_frame())
@@ -438,7 +438,7 @@ enum AudioInputSourceConfig {
 
 struct DeviceAudioStream {
     _stream: cpal::Stream,
-    frames: UnboundedReceiverStream<Result<AudioFrame>>,
+    frames: UnboundedReceiverStream<Result<AudioSlice>>,
 }
 
 impl AudioInput {
@@ -550,13 +550,12 @@ impl AudioInput {
             }
         }
     }
-
 }
 
 impl Unpin for DeviceAudioStream {}
 
 impl Stream for DeviceAudioStream {
-    type Item = Result<AudioFrame>;
+    type Item = Result<AudioSlice>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.frames).poll_next(context)
@@ -698,11 +697,10 @@ impl AudioOutput {
             })),
         }
     }
-
 }
 
 impl FileAudioSink {
-    fn send_frame(&mut self, frame: AudioFrame) -> Result<()> {
+    fn send_frame(&mut self, frame: AudioSlice) -> Result<()> {
         let mut frame = frame;
         if let Some(sample_rate) = self.sample_rate {
             frame.sample_rate = sample_rate;
@@ -751,7 +749,7 @@ impl FileAudioSink {
 }
 
 impl DeviceAudioSink {
-    fn send_frame(&mut self, frame: AudioFrame) -> Result<()> {
+    fn send_frame(&mut self, frame: AudioSlice) -> Result<()> {
         validate_frame(&frame)?;
 
         if self.state.is_none() {
@@ -807,7 +805,7 @@ impl DeviceAudioSink {
 }
 
 impl FileStreamWriter {
-    fn write_frame(&mut self, frame: &AudioFrame) -> Result<()> {
+    fn write_frame(&mut self, frame: &AudioSlice) -> Result<()> {
         match self {
             Self::Wav(writer) => writer.write_frame(frame),
             Self::Opus(writer) => writer.write_frame(frame),
@@ -822,14 +820,14 @@ impl FileStreamWriter {
     }
 }
 
-impl Sink<AudioFrame> for FileAudioSink {
+impl Sink<AudioSlice> for FileAudioSink {
     type Error = AudioError;
 
     fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: AudioFrame) -> Result<()> {
+    fn start_send(mut self: Pin<&mut Self>, item: AudioSlice) -> Result<()> {
         self.send_frame(item)
     }
 
@@ -842,34 +840,34 @@ impl Sink<AudioFrame> for FileAudioSink {
     }
 }
 
-impl Sink<Result<AudioFrame>> for FileAudioSink {
+impl Sink<Result<AudioSlice>> for FileAudioSink {
     type Error = AudioError;
 
     fn poll_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_ready(self, context)
+        <Self as Sink<AudioSlice>>::poll_ready(self, context)
     }
 
-    fn start_send(self: Pin<&mut Self>, item: Result<AudioFrame>) -> Result<()> {
-        <Self as Sink<AudioFrame>>::start_send(self, item?)
+    fn start_send(self: Pin<&mut Self>, item: Result<AudioSlice>) -> Result<()> {
+        <Self as Sink<AudioSlice>>::start_send(self, item?)
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_flush(self, context)
+        <Self as Sink<AudioSlice>>::poll_flush(self, context)
     }
 
     fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_close(self, context)
+        <Self as Sink<AudioSlice>>::poll_close(self, context)
     }
 }
 
-impl Sink<AudioFrame> for DeviceAudioSink {
+impl Sink<AudioSlice> for DeviceAudioSink {
     type Error = AudioError;
 
     fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: AudioFrame) -> Result<()> {
+    fn start_send(mut self: Pin<&mut Self>, item: AudioSlice) -> Result<()> {
         self.send_frame(item)
     }
 
@@ -887,23 +885,23 @@ impl Sink<AudioFrame> for DeviceAudioSink {
     }
 }
 
-impl Sink<Result<AudioFrame>> for DeviceAudioSink {
+impl Sink<Result<AudioSlice>> for DeviceAudioSink {
     type Error = AudioError;
 
     fn poll_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_ready(self, context)
+        <Self as Sink<AudioSlice>>::poll_ready(self, context)
     }
 
-    fn start_send(self: Pin<&mut Self>, item: Result<AudioFrame>) -> Result<()> {
-        <Self as Sink<AudioFrame>>::start_send(self, item?)
+    fn start_send(self: Pin<&mut Self>, item: Result<AudioSlice>) -> Result<()> {
+        <Self as Sink<AudioSlice>>::start_send(self, item?)
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_flush(self, context)
+        <Self as Sink<AudioSlice>>::poll_flush(self, context)
     }
 
     fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioFrame>>::poll_close(self, context)
+        <Self as Sink<AudioSlice>>::poll_close(self, context)
     }
 }
 
@@ -912,7 +910,7 @@ struct WavStreamWriter {
 }
 
 impl WavStreamWriter {
-    fn create(output: &Path, frame: &AudioFrame) -> Result<Self> {
+    fn create(output: &Path, frame: &AudioSlice) -> Result<Self> {
         let spec = hound::WavSpec {
             channels: frame.channels,
             sample_rate: frame.sample_rate,
@@ -925,7 +923,7 @@ impl WavStreamWriter {
         })
     }
 
-    fn write_frame(&mut self, frame: &AudioFrame) -> Result<()> {
+    fn write_frame(&mut self, frame: &AudioSlice) -> Result<()> {
         for sample in &frame.samples {
             self.writer.write_sample(*sample).map_err(output_error)?;
         }
@@ -949,7 +947,7 @@ struct OpusStreamWriter {
 }
 
 impl OpusStreamWriter {
-    fn create(output: &Path, frame: &AudioFrame, bitrate: Option<i32>) -> Result<Self> {
+    fn create(output: &Path, frame: &AudioSlice, bitrate: Option<i32>) -> Result<Self> {
         let output_channels = if frame.channels == 1 { 1 } else { 2 };
         let opus_channels = match output_channels {
             1 => Channels::Mono,
@@ -991,7 +989,7 @@ impl OpusStreamWriter {
         })
     }
 
-    fn write_frame(&mut self, frame: &AudioFrame) -> Result<()> {
+    fn write_frame(&mut self, frame: &AudioSlice) -> Result<()> {
         let opus_samples = prepare_opus_samples(
             &frame.samples,
             frame.channels as usize,
@@ -1061,7 +1059,7 @@ struct PlaybackState {
 
 fn enqueue_output_frame(
     state: &Arc<Mutex<PlaybackState>>,
-    frame: &AudioFrame,
+    frame: &AudioSlice,
     output_channels: u16,
     output_sample_rate: u32,
 ) -> Result<()> {
@@ -1163,7 +1161,7 @@ fn build_input_stream(
     sample_format: cpal::SampleFormat,
     channels: u16,
     sample_rate: u32,
-    sender: mpsc::UnboundedSender<Result<AudioFrame>>,
+    sender: mpsc::UnboundedSender<Result<AudioSlice>>,
 ) -> Result<cpal::Stream> {
     let error_sender = sender.clone();
     let err_fn = move |error: cpal::StreamError| {
@@ -1177,7 +1175,7 @@ fn build_input_stream(
                 config,
                 move |data: &[$sample], _| {
                     let samples = convert_samples(data, $convert);
-                    let frame = AudioFrame {
+                    let frame = AudioSlice {
                         samples,
                         channels,
                         sample_rate,
@@ -1221,7 +1219,7 @@ where
         .collect()
 }
 
-fn validate_frame(frame: &AudioFrame) -> Result<()> {
+fn validate_frame(frame: &AudioSlice) -> Result<()> {
     if frame.channels == 0 {
         return Err(invalid_input("audio channel count is missing"));
     }
@@ -1237,9 +1235,9 @@ fn validate_frame(frame: &AudioFrame) -> Result<()> {
     Ok(())
 }
 
-fn validate_frame_format(channels: u16, sample_rate: u32, frame: &AudioFrame) -> Result<()> {
+fn validate_frame_format(channels: u16, sample_rate: u32, frame: &AudioSlice) -> Result<()> {
     if frame.channels != channels || frame.sample_rate != sample_rate {
-        return Err(invalid_input("audio frame format changed"));
+        return Err(invalid_input("audio slice format changed"));
     }
 
     Ok(())
@@ -1497,7 +1495,7 @@ mod tests {
     #[tokio::test]
     async fn output_stream_writes_wav_frames() -> Result<()> {
         let output = temp_path("writer-output.wav")?;
-        let frames: Vec<Result<AudioFrame>> = vec![Ok(AudioFrame {
+        let frames: Vec<Result<AudioSlice>> = vec![Ok(AudioSlice {
             samples: vec![0.0, 0.25, -0.25, 0.0],
             channels: 2,
             sample_rate: 48_000,
@@ -1639,7 +1637,7 @@ mod tests {
     #[tokio::test]
     async fn builder_output_writes_wav() -> Result<()> {
         let output = temp_path("builder-output.wav")?;
-        let frames: Vec<Result<AudioFrame>> = vec![Ok(AudioFrame {
+        let frames: Vec<Result<AudioSlice>> = vec![Ok(AudioSlice {
             samples: vec![0.0, 0.25, -0.25, 0.0],
             channels: 2,
             sample_rate: 48_000,

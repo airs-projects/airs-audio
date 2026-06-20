@@ -33,7 +33,7 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `AudioEncoder::from_type(audio_type)` - Create output encoder selection from an `AudioType`.
 - `AudioDecoder` - Audio decoder selection for file input streams.
 - `AudioDecoder::from_type(audio_type)` - Create decoder selection from an `AudioType`.
-- `AudioFrame` - Interleaved `f32` PCM samples with channel count and sample rate.
+- `AudioSlice` - Interleaved `f32` PCM samples with channel count and sample rate.
 
 - `AudioInput` - Self-builder for device or file input. Consumed by `.open()` to produce an `AudioStream`.
 - `AudioInput::default_device()` - Select the default input device.
@@ -44,7 +44,7 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `.channels(n)` - Override the channel count for device streams.
 - `.buffer_size(size)` - Override the buffer size for device streams.
 - `.open(self)` - Consume and build the `AudioStream`.
-- `AudioStream` - Boxed Tokio stream of decoded or captured `AudioFrame` values.
+- `AudioStream` - Boxed Tokio stream of decoded or captured `AudioSlice` values.
 
 - `AudioOutput` - Self-builder for file or device output. Consumed by `.open()` to produce an `AudioSink`.
 - `AudioOutput::default_device()` - Select the default output device.
@@ -55,4 +55,4 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `.channels(n)` - Override the channel count for device streams or file output.
 - `.buffer_size(size)` - Override the buffer size for device streams.
 - `.open(self)` - Consume and build the `AudioSink`.
-- `AudioSink` - `Pin<Box<dyn Sink<AudioFrame, Error = AudioError> + Send>>` for output to files or devices.
+- `AudioSink` - `Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>` for output to files or devices.
