@@ -733,6 +733,17 @@ impl DeviceAudioSink {
                 sample_format,
                 playback.clone(),
             )?;
+
+            // Queue the first frame BEFORE starting the stream so the
+            // WASAPI callback never sees an empty buffer on init.
+            enqueue_output_frame(
+                &playback,
+                &frame,
+                output_channels,
+                output_sample_rate,
+            )?;
+
+            // Start playback after samples are ready.
             stream.play()?;
 
             self.state = Some(DeviceSinkState {
@@ -741,6 +752,8 @@ impl DeviceAudioSink {
                 output_channels,
                 output_sample_rate,
             });
+
+            return Ok(());
         }
 
         let state = self
