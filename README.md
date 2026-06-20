@@ -35,10 +35,9 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `AudioDecoder::from_type(audio_type)` - Create decoder selection from an `AudioType`.
 - `AudioSlice` - Interleaved `f32` PCM samples with channel count and sample rate.
 
+- `AudioInputSource` - Input source enum: default or named device, or file.
 - `AudioInput` - Self-builder for device or file input. Consumed by `.open()` to produce an `AudioStream`.
-- `AudioInput::default_device()` - Select the default input device.
-- `AudioInput::device(name)` - Select an input device by name.
-- `AudioInput::file(input)` - Select file input and infer decoder from filename.
+- `AudioInput::new(source)` - Select the input source.
 - `.decoder(decoder)` - Manually set the file decoder and ignore filename inference.
 - `.sample_rate(rate)` - Override the sample rate for device streams.
 - `.channels(n)` - Override the channel count for device streams.
@@ -46,10 +45,9 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `.open(self)` - Consume and build the `AudioStream`.
 - `AudioStream` - Boxed Tokio stream of decoded or captured `AudioSlice` values.
 
+- `AudioOutputTarget` - Output target enum: default or named device, or file.
 - `AudioOutput` - Self-builder for file or device output. Consumed by `.open()` to produce an `AudioSink`.
-- `AudioOutput::default_device()` - Select the default output device.
-- `AudioOutput::device(name)` - Select an output device by name.
-- `AudioOutput::file(output)` - Select file output and infer encoder from filename.
+- `AudioOutput::new(target)` - Select the output target.
 - `.encoder(encoder)` - Manually set the file encoder and ignore filename inference.
 - `.sample_rate(rate)` - Override the sample rate for device streams or file output.
 - `.channels(n)` - Override the channel count for device streams or file output.

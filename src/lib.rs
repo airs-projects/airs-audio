@@ -422,18 +422,18 @@ impl Stream for FileAudioStream {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioInputSource {
+    Device(Option<String>),
+    File(PathBuf),
+}
+
 pub struct AudioInput {
-    source: AudioInputSourceConfig,
+    source: AudioInputSource,
     decoder: Option<AudioDecoder>,
     sample_rate: Option<u32>,
     channels: Option<u16>,
     buffer_size: Option<u32>,
-}
-
-#[derive(Clone)]
-enum AudioInputSourceConfig {
-    Device { device_name: Option<String> },
-    File { input: PathBuf },
 }
 
 struct DeviceAudioStream {
@@ -442,33 +442,9 @@ struct DeviceAudioStream {
 }
 
 impl AudioInput {
-    pub fn default_device() -> Self {
+    pub fn new(source: AudioInputSource) -> Self {
         Self {
-            source: AudioInputSourceConfig::Device { device_name: None },
-            decoder: None,
-            sample_rate: None,
-            channels: None,
-            buffer_size: None,
-        }
-    }
-
-    pub fn device(name: impl Into<String>) -> Self {
-        Self {
-            source: AudioInputSourceConfig::Device {
-                device_name: Some(name.into()),
-            },
-            decoder: None,
-            sample_rate: None,
-            channels: None,
-            buffer_size: None,
-        }
-    }
-
-    pub fn file(input: impl AsRef<Path>) -> Self {
-        Self {
-            source: AudioInputSourceConfig::File {
-                input: input.as_ref().to_path_buf(),
-            },
+            source,
             decoder: None,
             sample_rate: None,
             channels: None,
@@ -498,7 +474,7 @@ impl AudioInput {
 
     pub fn open(self) -> Result<AudioStream> {
         match self.source {
-            AudioInputSourceConfig::Device { device_name } => {
+            AudioInputSource::Device(device_name) => {
                 let input = match device_name {
                     Some(device_name) => InputDevice::named(device_name)?,
                     None => InputDevice::default()?,
@@ -534,7 +510,7 @@ impl AudioInput {
                     frames: UnboundedReceiverStream::new(receiver),
                 }))
             }
-            AudioInputSourceConfig::File { input } => {
+            AudioInputSource::File(input) => {
                 let decoder = match self.decoder {
                     Some(decoder) => decoder,
                     None => match path_extension(&input) {
@@ -562,18 +538,18 @@ impl Stream for DeviceAudioStream {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioOutputTarget {
+    Device(Option<String>),
+    File(PathBuf),
+}
+
 pub struct AudioOutput {
-    target: AudioOutputTargetConfig,
+    target: AudioOutputTarget,
     encoder: Option<AudioEncoder>,
     sample_rate: Option<u32>,
     channels: Option<u16>,
     buffer_size: Option<u32>,
-}
-
-#[derive(Clone)]
-enum AudioOutputTargetConfig {
-    File { output: PathBuf },
-    Device { device_name: Option<String> },
 }
 
 struct FileAudioSink {
@@ -614,33 +590,9 @@ impl Unpin for FileAudioSink {}
 impl Unpin for DeviceAudioSink {}
 
 impl AudioOutput {
-    pub fn default_device() -> Self {
+    pub fn new(target: AudioOutputTarget) -> Self {
         Self {
-            target: AudioOutputTargetConfig::Device { device_name: None },
-            encoder: None,
-            sample_rate: None,
-            channels: None,
-            buffer_size: None,
-        }
-    }
-
-    pub fn device(name: impl Into<String>) -> Self {
-        Self {
-            target: AudioOutputTargetConfig::Device {
-                device_name: Some(name.into()),
-            },
-            encoder: None,
-            sample_rate: None,
-            channels: None,
-            buffer_size: None,
-        }
-    }
-
-    pub fn file(output: impl AsRef<Path>) -> Self {
-        Self {
-            target: AudioOutputTargetConfig::File {
-                output: output.as_ref().to_path_buf(),
-            },
+            target,
             encoder: None,
             sample_rate: None,
             channels: None,
@@ -670,7 +622,7 @@ impl AudioOutput {
 
     pub fn open(self) -> Result<AudioSink> {
         match &self.target {
-            AudioOutputTargetConfig::File { output } => {
+            AudioOutputTarget::File(output) => {
                 let encoder = match self.encoder {
                     Some(encoder) => encoder,
                     None => {
@@ -688,7 +640,7 @@ impl AudioOutput {
                     state: None,
                 }))
             }
-            AudioOutputTargetConfig::Device { device_name } => Ok(Box::pin(DeviceAudioSink {
+            AudioOutputTarget::Device(device_name) => Ok(Box::pin(DeviceAudioSink {
                 device_name: device_name.clone(),
                 sample_rate: self.sample_rate,
                 channels: self.channels,
@@ -1478,7 +1430,7 @@ mod tests {
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
 
-        let mut stream = AudioInput::file(&input).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
         let frame = stream
             .next()
             .await
@@ -1501,7 +1453,7 @@ mod tests {
             sample_rate: 48_000,
         })];
 
-        let mut output_sink = AudioOutput::file(&output).open()?;
+        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
         let mut stream = Box::pin(tokio_stream::iter(frames));
 
         while let Some(frame) = stream.next().await {
@@ -1510,7 +1462,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::file(&output).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
         let frame = stream
             .next()
             .await
@@ -1530,8 +1482,8 @@ mod tests {
         let output = temp_path("convert-output.wav")?;
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
-        let mut input_stream = AudioInput::file(&input).open()?;
-        let mut output_sink = AudioOutput::file(&output).open()?;
+        let mut input_stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
+        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
 
         while let Some(frame) = input_stream.next().await {
             output_sink.send(frame?).await?;
@@ -1539,7 +1491,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::file(&output).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
         let converted = stream
             .next()
             .await
@@ -1620,7 +1572,7 @@ mod tests {
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
 
-        let mut stream = AudioInput::file(&input).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
         let frame = stream
             .next()
             .await
@@ -1643,7 +1595,7 @@ mod tests {
             sample_rate: 48_000,
         })];
 
-        let mut sink = AudioOutput::file(&output).open()?;
+        let mut sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
         let mut stream = Box::pin(tokio_stream::iter(frames));
 
         while let Some(frame) = stream.next().await {
@@ -1652,7 +1604,7 @@ mod tests {
 
         sink.close().await?;
 
-        let mut stream = AudioInput::file(&output).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
         let frame = stream
             .next()
             .await
@@ -1672,8 +1624,8 @@ mod tests {
         let output = temp_path("builder-convert-output.wav")?;
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
-        let mut input_stream = AudioInput::file(&input).open()?;
-        let mut output_sink = AudioOutput::file(&output).open()?;
+        let mut input_stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
+        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
 
         while let Some(frame) = input_stream.next().await {
             output_sink.send(frame?).await?;
@@ -1681,7 +1633,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::file(&output).open()?;
+        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
         let converted = stream
             .next()
             .await
