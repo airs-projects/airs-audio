@@ -23,6 +23,9 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `Result<T>` - Library result type using `AudioError`.
 - `AudioError` - Error enum for device, stream, decode, input, and I/O failures.
 
+- `InputSource` - Re-export from `airs-io`; input source enum shared by text/audio/ASR/TTS crates.
+- `OutputTarget` - Re-export from `airs-io`; output target enum shared by text/audio/ASR/TTS crates.
+
 - `list_audio_devices()` - List input and output devices with default markers.
 - `AudioDeviceList` - Input and output device info lists.
 - `AudioDeviceInfo` - Device name plus default-device marker.
@@ -35,22 +38,18 @@ airs-audio pipe -i:d mic -o:d speaker -o:f record.wav
 - `AudioDecoder::from_type(audio_type)` - Create decoder selection from an `AudioType`.
 - `AudioSlice` - Interleaved `f32` PCM samples with channel count and sample rate.
 
-- `AudioInputSource` - Input source enum: default or named device, or file.
-- `AudioInput` - Self-builder for device or file input. Consumed by `.open()` to produce an `AudioStream`.
-- `AudioInput::new(source)` - Select the input source.
+- `AudioInput` - Audio input object. Implements `Stream<Item = Result<AudioSlice>>` for file or device input.
+- `AudioInput::new(source)` - Select an `InputSource::File` or `InputSource::Device` source.
 - `.decoder(decoder)` - Manually set the file decoder and ignore filename inference.
 - `.sample_rate(rate)` - Override the sample rate for device streams.
 - `.channels(n)` - Override the channel count for device streams.
 - `.buffer_size(size)` - Override the buffer size for device streams.
-- `.open(self)` - Consume and build the `AudioStream`.
-- `AudioStream` - Boxed Tokio stream of decoded or captured `AudioSlice` values.
+- `AudioStream` - Alias for `AudioInput`.
 
-- `AudioOutputTarget` - Output target enum: default or named device, or file.
-- `AudioOutput` - Self-builder for file or device output. Consumed by `.open()` to produce an `AudioSink`.
-- `AudioOutput::new(target)` - Select the output target.
+- `AudioOutput` - Audio output object. Implements `Sink<AudioSlice, Error = AudioError>` for file or device output.
+- `AudioOutput::new(target)` - Select an `OutputTarget::File` or `OutputTarget::Device` target.
 - `.encoder(encoder)` - Manually set the file encoder and ignore filename inference.
 - `.sample_rate(rate)` - Override the sample rate for device streams or file output.
 - `.channels(n)` - Override the channel count for device streams or file output.
 - `.buffer_size(size)` - Override the buffer size for device streams.
-- `.open(self)` - Consume and build the `AudioSink`.
-- `AudioSink` - `Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>` for output to files or devices.
+- `AudioSink` - Alias for `AudioOutput`.

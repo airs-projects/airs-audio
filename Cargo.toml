@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+airs-io = { path = "../airs-io" }
 cpal = "0.16.0"
 ctrlc = "3.5.1"
 futures = { version = "0.3.31", default-features = false, features = ["std"] }

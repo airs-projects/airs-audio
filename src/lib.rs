@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
+pub use airs_io::{InputSource, OutputTarget};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::Sink;
 use ogg::{PacketWriteEndInfo, PacketWriter};
@@ -27,8 +28,10 @@ pub fn version() -> &'static str {
 }
 
 pub type Result<T> = std::result::Result<T, AudioError>;
-pub type AudioStream = Pin<Box<dyn Stream<Item = Result<AudioSlice>> + Send>>;
-pub type AudioSink = Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>;
+type BoxedAudioStream = Pin<Box<dyn Stream<Item = Result<AudioSlice>> + Send>>;
+type BoxedAudioSink = Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>;
+pub type AudioStream = AudioInput;
+pub type AudioSink = AudioOutput;
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES: usize = 960;
@@ -422,18 +425,13 @@ impl Stream for FileAudioStream {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AudioInputSource {
-    Device(Option<String>),
-    File(PathBuf),
-}
-
 pub struct AudioInput {
-    source: AudioInputSource,
+    source: InputSource,
     decoder: Option<AudioDecoder>,
     sample_rate: Option<u32>,
     channels: Option<u16>,
     buffer_size: Option<u32>,
+    stream: Option<BoxedAudioStream>,
 }
 
 struct DeviceAudioStream {
@@ -442,13 +440,14 @@ struct DeviceAudioStream {
 }
 
 impl AudioInput {
-    pub fn new(source: AudioInputSource) -> Self {
+    pub fn new(source: InputSource) -> Self {
         Self {
             source,
             decoder: None,
             sample_rate: None,
             channels: None,
             buffer_size: None,
+            stream: None,
         }
     }
 
@@ -472,63 +471,38 @@ impl AudioInput {
         self
     }
 
-    pub fn open(self) -> Result<AudioStream> {
-        match self.source {
-            AudioInputSource::Device(device_name) => {
-                let input = match device_name {
-                    Some(device_name) => InputDevice::named(device_name)?,
-                    None => InputDevice::default()?,
-                };
-                let config = input.device.default_input_config()?;
-                let sample_format = config.sample_format();
-                let mut stream_config = config.config();
-                if let Some(sample_rate) = self.sample_rate {
-                    stream_config.sample_rate = cpal::SampleRate(sample_rate);
-                }
-                if let Some(channels) = self.channels {
-                    stream_config.channels = channels;
-                }
-                if let Some(buffer_size) = self.buffer_size {
-                    stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
-                }
-                let channels = stream_config.channels;
-                let sample_rate = stream_config.sample_rate.0;
-                let (sender, receiver) = mpsc::unbounded_channel();
-                let stream = build_input_stream(
-                    &input.device,
-                    &stream_config,
-                    sample_format,
-                    channels,
-                    sample_rate,
-                    sender,
-                )?;
+    pub fn source(&self) -> &InputSource {
+        &self.source
+    }
 
-                stream.play()?;
+    pub fn into_source(self) -> InputSource {
+        self.source
+    }
 
-                Ok(Box::pin(DeviceAudioStream {
-                    _stream: stream,
-                    frames: UnboundedReceiverStream::new(receiver),
-                }))
-            }
-            AudioInputSource::File(input) => {
-                let decoder = match self.decoder {
-                    Some(decoder) => decoder,
-                    None => match path_extension(&input) {
-                        Some(extension) => {
-                            AudioDecoder::from_type(AudioType::from_extension(extension)?)
-                        }
-                        None => AudioDecoder { audio_type: None },
-                    },
-                };
-                let file = File::open(&input)?;
-
-                Ok(Box::pin(FileAudioStream::open(file, &decoder)?))
-            }
+    fn ensure_stream(&mut self) -> &mut BoxedAudioStream {
+        if self.stream.is_none() {
+            self.stream = Some(audio_stream(
+                self.source.clone(),
+                self.decoder.clone(),
+                self.sample_rate,
+                self.channels,
+                self.buffer_size,
+            ));
         }
+
+        self.stream.as_mut().expect("audio stream is initialized")
     }
 }
 
 impl Unpin for DeviceAudioStream {}
+
+impl Stream for AudioInput {
+    type Item = Result<AudioSlice>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.ensure_stream().as_mut().poll_next(context)
+    }
+}
 
 impl Stream for DeviceAudioStream {
     type Item = Result<AudioSlice>;
@@ -538,18 +512,90 @@ impl Stream for DeviceAudioStream {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AudioOutputTarget {
-    Device(Option<String>),
-    File(PathBuf),
+fn audio_stream(
+    source: InputSource,
+    decoder: Option<AudioDecoder>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    buffer_size: Option<u32>,
+) -> BoxedAudioStream {
+    match open_audio_stream(source, decoder, sample_rate, channels, buffer_size) {
+        Ok(stream) => stream,
+        Err(error) => Box::pin(tokio_stream::iter(vec![Err(error)])),
+    }
+}
+
+fn open_audio_stream(
+    source: InputSource,
+    decoder: Option<AudioDecoder>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    buffer_size: Option<u32>,
+) -> Result<BoxedAudioStream> {
+    match source {
+        InputSource::Device(device_name) => {
+            let input = match device_name {
+                Some(device_name) => InputDevice::named(device_name)?,
+                None => InputDevice::default()?,
+            };
+            let config = input.device.default_input_config()?;
+            let sample_format = config.sample_format();
+            let mut stream_config = config.config();
+            if let Some(sample_rate) = sample_rate {
+                stream_config.sample_rate = cpal::SampleRate(sample_rate);
+            }
+            if let Some(channels) = channels {
+                stream_config.channels = channels;
+            }
+            if let Some(buffer_size) = buffer_size {
+                stream_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+            }
+            let channels = stream_config.channels;
+            let sample_rate = stream_config.sample_rate.0;
+            let (sender, receiver) = mpsc::unbounded_channel();
+            let stream = build_input_stream(
+                &input.device,
+                &stream_config,
+                sample_format,
+                channels,
+                sample_rate,
+                sender,
+            )?;
+
+            stream.play()?;
+
+            Ok(Box::pin(DeviceAudioStream {
+                _stream: stream,
+                frames: UnboundedReceiverStream::new(receiver),
+            }))
+        }
+        InputSource::File(input) => {
+            let decoder = match decoder {
+                Some(decoder) => decoder,
+                None => match path_extension(&input) {
+                    Some(extension) => {
+                        AudioDecoder::from_type(AudioType::from_extension(extension)?)
+                    }
+                    None => AudioDecoder { audio_type: None },
+                },
+            };
+            let file = File::open(&input)?;
+
+            Ok(Box::pin(FileAudioStream::open(file, &decoder)?))
+        }
+        InputSource::Text(_) | InputSource::Stdin => Err(invalid_input(
+            "audio input requires a file or device source",
+        )),
+    }
 }
 
 pub struct AudioOutput {
-    target: AudioOutputTarget,
+    target: OutputTarget,
     encoder: Option<AudioEncoder>,
     sample_rate: Option<u32>,
     channels: Option<u16>,
     buffer_size: Option<u32>,
+    sink: Option<BoxedAudioSink>,
 }
 
 struct FileAudioSink {
@@ -590,13 +636,14 @@ impl Unpin for FileAudioSink {}
 impl Unpin for DeviceAudioSink {}
 
 impl AudioOutput {
-    pub fn new(target: AudioOutputTarget) -> Self {
+    pub fn new(target: OutputTarget) -> Self {
         Self {
             target,
             encoder: None,
             sample_rate: None,
             channels: None,
             buffer_size: None,
+            sink: None,
         }
     }
 
@@ -620,34 +667,94 @@ impl AudioOutput {
         self
     }
 
-    pub fn open(self) -> Result<AudioSink> {
-        match &self.target {
-            AudioOutputTarget::File(output) => {
-                let encoder = match self.encoder {
-                    Some(encoder) => encoder,
-                    None => {
-                        let extension = path_extension(output)
-                            .ok_or_else(|| invalid_input("output file must have an extension"))?;
-                        AudioEncoder::from_type(AudioType::from_extension(extension)?)?
-                    }
-                };
+    pub fn target(&self) -> &OutputTarget {
+        &self.target
+    }
 
-                Ok(Box::pin(FileAudioSink {
-                    output: output.clone(),
-                    encoder,
-                    sample_rate: self.sample_rate,
-                    channels: self.channels,
-                    state: None,
-                }))
-            }
-            AudioOutputTarget::Device(device_name) => Ok(Box::pin(DeviceAudioSink {
-                device_name: device_name.clone(),
-                sample_rate: self.sample_rate,
-                channels: self.channels,
-                buffer_size: self.buffer_size,
-                state: None,
-            })),
+    pub fn into_target(self) -> OutputTarget {
+        self.target
+    }
+
+    fn ensure_sink(&mut self) -> Result<&mut BoxedAudioSink> {
+        if self.sink.is_none() {
+            self.sink = Some(audio_sink(
+                self.target.clone(),
+                self.encoder.clone(),
+                self.sample_rate,
+                self.channels,
+                self.buffer_size,
+            )?);
         }
+
+        Ok(self.sink.as_mut().expect("audio sink is initialized"))
+    }
+}
+
+impl Sink<AudioSlice> for AudioOutput {
+    type Error = AudioError;
+
+    fn poll_ready(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
+        match self.ensure_sink() {
+            Ok(sink) => sink.as_mut().poll_ready(context),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: AudioSlice) -> Result<()> {
+        self.ensure_sink()?.as_mut().start_send(item)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
+        match self.ensure_sink() {
+            Ok(sink) => sink.as_mut().poll_flush(context),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
+        match self.ensure_sink() {
+            Ok(sink) => sink.as_mut().poll_close(context),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+}
+
+fn audio_sink(
+    target: OutputTarget,
+    encoder: Option<AudioEncoder>,
+    sample_rate: Option<u32>,
+    channels: Option<u16>,
+    buffer_size: Option<u32>,
+) -> Result<BoxedAudioSink> {
+    match target {
+        OutputTarget::File(output) => {
+            let encoder = match encoder {
+                Some(encoder) => encoder,
+                None => {
+                    let extension = path_extension(&output)
+                        .ok_or_else(|| invalid_input("output file must have an extension"))?;
+                    AudioEncoder::from_type(AudioType::from_extension(extension)?)?
+                }
+            };
+
+            Ok(Box::pin(FileAudioSink {
+                output,
+                encoder,
+                sample_rate,
+                channels,
+                state: None,
+            }))
+        }
+        OutputTarget::Device(device_name) => Ok(Box::pin(DeviceAudioSink {
+            device_name,
+            sample_rate,
+            channels,
+            buffer_size,
+            state: None,
+        })),
+        OutputTarget::Stdout => Err(invalid_input(
+            "audio output requires a file or device target",
+        )),
     }
 }
 
@@ -736,12 +843,7 @@ impl DeviceAudioSink {
 
             // Queue the first frame BEFORE starting the stream so the
             // WASAPI callback never sees an empty buffer on init.
-            enqueue_output_frame(
-                &playback,
-                &frame,
-                output_channels,
-                output_sample_rate,
-            )?;
+            enqueue_output_frame(&playback, &frame, output_channels, output_sample_rate)?;
 
             // Start playback after samples are ready.
             stream.play()?;
@@ -805,26 +907,6 @@ impl Sink<AudioSlice> for FileAudioSink {
     }
 }
 
-impl Sink<Result<AudioSlice>> for FileAudioSink {
-    type Error = AudioError;
-
-    fn poll_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_ready(self, context)
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: Result<AudioSlice>) -> Result<()> {
-        <Self as Sink<AudioSlice>>::start_send(self, item?)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_flush(self, context)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_close(self, context)
-    }
-}
-
 impl Sink<AudioSlice> for DeviceAudioSink {
     type Error = AudioError;
 
@@ -847,26 +929,6 @@ impl Sink<AudioSlice> for DeviceAudioSink {
             }
         }
         Poll::Ready(Ok(()))
-    }
-}
-
-impl Sink<Result<AudioSlice>> for DeviceAudioSink {
-    type Error = AudioError;
-
-    fn poll_ready(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_ready(self, context)
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: Result<AudioSlice>) -> Result<()> {
-        <Self as Sink<AudioSlice>>::start_send(self, item?)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_flush(self, context)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Result<()>> {
-        <Self as Sink<AudioSlice>>::poll_close(self, context)
     }
 }
 
@@ -1443,7 +1505,7 @@ mod tests {
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(input.clone()));
         let frame = stream
             .next()
             .await
@@ -1466,7 +1528,7 @@ mod tests {
             sample_rate: 48_000,
         })];
 
-        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
+        let mut output_sink = AudioOutput::new(OutputTarget::File(output.clone()));
         let mut stream = Box::pin(tokio_stream::iter(frames));
 
         while let Some(frame) = stream.next().await {
@@ -1475,7 +1537,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(output.clone()));
         let frame = stream
             .next()
             .await
@@ -1495,8 +1557,8 @@ mod tests {
         let output = temp_path("convert-output.wav")?;
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
-        let mut input_stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
-        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
+        let mut input_stream = AudioInput::new(InputSource::File(input.clone()));
+        let mut output_sink = AudioOutput::new(OutputTarget::File(output.clone()));
 
         while let Some(frame) = input_stream.next().await {
             output_sink.send(frame?).await?;
@@ -1504,7 +1566,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(output.clone()));
         let converted = stream
             .next()
             .await
@@ -1585,7 +1647,7 @@ mod tests {
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(input.clone()));
         let frame = stream
             .next()
             .await
@@ -1608,7 +1670,7 @@ mod tests {
             sample_rate: 48_000,
         })];
 
-        let mut sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
+        let mut sink = AudioOutput::new(OutputTarget::File(output.clone()));
         let mut stream = Box::pin(tokio_stream::iter(frames));
 
         while let Some(frame) = stream.next().await {
@@ -1617,7 +1679,7 @@ mod tests {
 
         sink.close().await?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(output.clone()));
         let frame = stream
             .next()
             .await
@@ -1637,8 +1699,8 @@ mod tests {
         let output = temp_path("builder-convert-output.wav")?;
 
         write_test_wav_file(&input, &[0.0, 0.25, -0.25, 0.0], 2, 48_000)?;
-        let mut input_stream = AudioInput::new(AudioInputSource::File(input.clone())).open()?;
-        let mut output_sink = AudioOutput::new(AudioOutputTarget::File(output.clone())).open()?;
+        let mut input_stream = AudioInput::new(InputSource::File(input.clone()));
+        let mut output_sink = AudioOutput::new(OutputTarget::File(output.clone()));
 
         while let Some(frame) = input_stream.next().await {
             output_sink.send(frame?).await?;
@@ -1646,7 +1708,7 @@ mod tests {
 
         output_sink.close().await?;
 
-        let mut stream = AudioInput::new(AudioInputSource::File(output.clone())).open()?;
+        let mut stream = AudioInput::new(InputSource::File(output.clone()));
         let converted = stream
             .next()
             .await

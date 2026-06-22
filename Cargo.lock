@@ -6,6 +6,7 @@ version = 4
 name = "airs-audio"
 version = "0.1.0"
 dependencies = [
+ "airs-io",
  "cpal",
  "ctrlc",
  "futures",
@@ -13,6 +14,16 @@ dependencies = [
  "ogg",
  "opus2",
  "symphonia",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "airs-io"
+version = "0.1.0"
+dependencies = [
+ "futures",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
