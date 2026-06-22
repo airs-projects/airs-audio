@@ -30,9 +30,6 @@ pub fn version() -> &'static str {
 pub type Result<T> = std::result::Result<T, AudioError>;
 type BoxedAudioStream = Pin<Box<dyn Stream<Item = Result<AudioSlice>> + Send>>;
 type BoxedAudioSink = Pin<Box<dyn Sink<AudioSlice, Error = AudioError> + Send>>;
-pub type AudioStream = AudioInput;
-pub type AudioSink = AudioOutput;
-
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES: usize = 960;
 const OPUS_MAX_PACKET_BYTES: usize = 4_000;

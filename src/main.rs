@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use airs_audio::{
-    AudioInput, AudioOutput, AudioSink, InputSource, OutputTarget, list_audio_devices,
+    AudioInput, AudioOutput, InputSource, OutputTarget, list_audio_devices,
 };
 use futures::SinkExt;
 use tokio_stream::StreamExt;
@@ -167,7 +167,7 @@ fn cmd_list_devices() -> Result<(), Box<dyn Error>> {
 
 async fn cmd_pipe(source: InputSource, targets: Vec<OutputTarget>) -> Result<(), Box<dyn Error>> {
     let is_device_source = matches!(source, InputSource::Device(_));
-    let mut input_stream = AudioInput::new(source);
+    let mut input = AudioInput::new(source);
 
     let stop = Arc::new(AtomicBool::new(false));
     if is_device_source {
@@ -178,22 +178,22 @@ async fn cmd_pipe(source: InputSource, targets: Vec<OutputTarget>) -> Result<(),
         eprintln!("Piping audio. Press Ctrl+C to stop.");
     }
 
-    let mut sinks: Vec<AudioSink> = targets.iter().cloned().map(AudioOutput::new).collect();
+    let mut outputs: Vec<AudioOutput> = targets.iter().cloned().map(AudioOutput::new).collect();
 
     while !stop.load(Ordering::SeqCst) {
-        match input_stream.next().await {
+        match input.next().await {
             Some(frame) => {
                 let frame = frame?;
-                for sink in &mut sinks {
-                    sink.send(frame.clone()).await?;
+                for output in &mut outputs {
+                    output.send(frame.clone()).await?;
                 }
             }
             None => break,
         }
     }
 
-    for sink in &mut sinks {
-        sink.close().await?;
+    for output in &mut outputs {
+        output.close().await?;
     }
     print_written_files(targets);
     Ok(())
