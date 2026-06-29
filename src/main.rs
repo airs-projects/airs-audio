@@ -5,11 +5,21 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use airs_audio::{
-    AudioInput, AudioOutput, InputSource, OutputTarget, list_audio_devices,
-};
+use airs_audio::{AudioSink, AudioStream, list_audio_devices};
 use futures::SinkExt;
 use tokio_stream::StreamExt;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceSpec {
+    Device(Option<String>),
+    File(PathBuf),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TargetSpec {
+    Device(Option<String>),
+    File(PathBuf),
+}
 
 #[derive(Debug)]
 enum Command {
@@ -17,8 +27,8 @@ enum Command {
     Version,
     Devices,
     Pipe {
-        source: InputSource,
-        targets: Vec<OutputTarget>,
+        source: SourceSpec,
+        targets: Vec<TargetSpec>,
     },
 }
 
@@ -38,7 +48,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     match parse_command(args)? {
         Command::Help => cmd_help(),
-        Command::Version => cmd_version(),
+        Command::Version => println!("{}", airs_audio::version()),
         Command::Devices => cmd_list_devices()?,
         Command::Pipe { source, targets } => cmd_pipe(source, targets).await?,
     }
@@ -60,60 +70,70 @@ fn parse_command(args: Vec<String>) -> Result<Command, io::Error> {
 fn parse_pipe(args: &[String]) -> Result<Command, io::Error> {
     let mut source = None;
     let mut targets = Vec::new();
-
     let mut i = 0;
+
     while i < args.len() {
         match args[i].as_str() {
-            "-i:d" => {
+            "-i" => {
                 if source.is_some() {
                     return Err(invalid_input("-i can only be used once"));
                 }
-                let name = peek_value(args, &mut i);
-                source = Some(InputSource::Device(name));
-            }
-            "-i:f" => {
                 i += 1;
-                let path = args
+                let value = args
                     .get(i)
-                    .ok_or_else(|| invalid_input("-i:f requires a file path"))?;
-                if source.is_some() {
-                    return Err(invalid_input("-i can only be used once"));
-                }
-                source = Some(InputSource::File(PathBuf::from(path)));
+                    .ok_or_else(|| invalid_input("-i requires file:<path> or device[:name]"))?;
+                source = Some(parse_source(value)?);
             }
-            "-o:d" => {
-                let name = peek_value(args, &mut i);
-                targets.push(OutputTarget::Device(name));
-            }
-            "-o:f" => {
+            "-o" => {
                 i += 1;
-                let path = args
+                let value = args
                     .get(i)
-                    .ok_or_else(|| invalid_input("-o:f requires a file path"))?;
-                targets.push(OutputTarget::File(PathBuf::from(path)));
+                    .ok_or_else(|| invalid_input("-o requires file:<path> or device[:name]"))?;
+                targets.push(parse_target(value)?);
             }
             arg => return Err(invalid_input(format!("unexpected argument: {arg}"))),
         }
         i += 1;
     }
 
-    let source = source.ok_or_else(|| invalid_input("pipe requires -i:d or -i:f"))?;
+    let source =
+        source.ok_or_else(|| invalid_input("pipe requires -i file:<path> or -i device[:name]"))?;
     if targets.is_empty() {
-        return Err(invalid_input("pipe requires at least one -o:d or -o:f"));
+        return Err(invalid_input(
+            "pipe requires at least one -o file:<path> or -o device[:name]",
+        ));
     }
 
     Ok(Command::Pipe { source, targets })
 }
 
-/// Peek at the next argument; if it looks like a value (not a flag), consume it.
-fn peek_value(args: &[String], i: &mut usize) -> Option<String> {
-    if let Some(next) = args.get(*i + 1) {
-        if !next.starts_with('-') {
-            *i += 1;
-            return Some(next.clone());
-        }
+fn parse_source(value: &str) -> Result<SourceSpec, io::Error> {
+    match split_typed_value(value) {
+        ("file", Some(path)) if !path.is_empty() => Ok(SourceSpec::File(PathBuf::from(path))),
+        ("file", _) => Err(invalid_input("-i file requires a path")),
+        ("device", name) => Ok(SourceSpec::Device(
+            name.filter(|name| !name.is_empty()).map(str::to_owned),
+        )),
+        (kind, _) => Err(invalid_input(format!("unsupported input type: {kind}"))),
     }
-    None
+}
+
+fn parse_target(value: &str) -> Result<TargetSpec, io::Error> {
+    match split_typed_value(value) {
+        ("file", Some(path)) if !path.is_empty() => Ok(TargetSpec::File(PathBuf::from(path))),
+        ("file", _) => Err(invalid_input("-o file requires a path")),
+        ("device", name) => Ok(TargetSpec::Device(
+            name.filter(|name| !name.is_empty()).map(str::to_owned),
+        )),
+        (kind, _) => Err(invalid_input(format!("unsupported output type: {kind}"))),
+    }
+}
+
+fn split_typed_value(value: &str) -> (&str, Option<&str>) {
+    match value.split_once(':') {
+        Some((kind, value)) => (kind, Some(value)),
+        None => (value, None),
+    }
 }
 
 fn cmd_help() {
@@ -121,23 +141,19 @@ fn cmd_help() {
     println!("  airs-audio --help");
     println!("  airs-audio --version");
     println!("  airs-audio list_devices");
-    println!("  airs-audio pipe -i:d [device] -i:f <file> -o:d [device] -o:f <file>");
+    println!("  airs-audio pipe -i <source> -o <target> [-o <target>...]");
     println!();
-    println!("  -i:d          Default input device");
-    println!("  -i:d <name>   Named input device");
-    println!("  -i:f <path>   Input file");
-    println!("  -o:d          Default output device");
-    println!("  -o:d <name>   Named output device");
-    println!("  -o:f <path>   Output file");
+    println!("  -i device         Default input device");
+    println!("  -i device:<name>  Named input device");
+    println!("  -i file:<path>    Input file");
+    println!("  -o device         Default output device");
+    println!("  -o device:<name>  Named output device");
+    println!("  -o file:<path>    Output file");
     println!();
     println!("Examples:");
-    println!("  airs-audio pipe -i:f music.wav -o:d");
-    println!("  airs-audio pipe -i:d -o:f record.wav");
-    println!("  airs-audio pipe -i:d mic -o:d speaker -o:f record.wav");
-}
-
-fn cmd_version() {
-    println!("{}", airs_audio::version());
+    println!("  airs-audio pipe -i file:music.wav -o device");
+    println!("  airs-audio pipe -i device -o file:record.wav");
+    println!("  airs-audio pipe -i device:mic -o device:speaker -o file:record.wav");
 }
 
 fn cmd_list_devices() -> Result<(), Box<dyn Error>> {
@@ -145,63 +161,87 @@ fn cmd_list_devices() -> Result<(), Box<dyn Error>> {
 
     println!("Input devices:");
     for device in devices.inputs {
-        if device.is_default {
-            println!("{} (default)", device.name);
-        } else {
-            println!("{}", device.name);
-        }
+        print_device(device.name, device.is_default);
     }
 
     println!();
     println!("Output devices:");
     for device in devices.outputs {
-        if device.is_default {
-            println!("{} (default)", device.name);
-        } else {
-            println!("{}", device.name);
-        }
+        print_device(device.name, device.is_default);
     }
 
     Ok(())
 }
 
-async fn cmd_pipe(source: InputSource, targets: Vec<OutputTarget>) -> Result<(), Box<dyn Error>> {
-    let is_device_source = matches!(source, InputSource::Device(_));
-    let mut input = AudioInput::new(source);
+fn print_device(name: String, is_default: bool) {
+    if is_default {
+        println!("{name} (default)");
+    } else {
+        println!("{name}");
+    }
+}
 
+async fn cmd_pipe(source: SourceSpec, targets: Vec<TargetSpec>) -> Result<(), Box<dyn Error>> {
+    let mut input = source.into_stream();
+    let mut outputs: Vec<AudioSink> = targets.iter().map(TargetSpec::sink).collect();
     let stop = Arc::new(AtomicBool::new(false));
-    if is_device_source {
-        let stop_signal = stop.clone();
-        ctrlc::set_handler(move || {
-            stop_signal.store(true, Ordering::SeqCst);
-        })?;
-        eprintln!("Piping audio. Press Ctrl+C to stop.");
-    }
 
-    let mut outputs: Vec<AudioOutput> = targets.iter().cloned().map(AudioOutput::new).collect();
+    let pipeline_stop = stop.clone();
+    let pipeline = tokio::spawn(async move {
+        input.start()?;
 
-    while !stop.load(Ordering::SeqCst) {
-        match input.next().await {
-            Some(frame) => {
-                let frame = frame?;
-                for output in &mut outputs {
-                    output.send(frame.clone()).await?;
+        while !pipeline_stop.load(Ordering::SeqCst) {
+            match input.next().await {
+                Some(Ok(frame)) => {
+                    for output in &mut outputs {
+                        output.send(frame.clone()).await?;
+                    }
                 }
+                Some(Err(error)) => return Err(error),
+                None => break,
             }
-            None => break,
         }
-    }
 
-    for output in &mut outputs {
-        output.close().await?;
-    }
-    print_written_files(targets);
+        for output in &mut outputs {
+            output.close().await?;
+        }
+
+        Ok::<_, airs_audio::AudioError>(())
+    });
+
+    eprintln!("Piping audio. Press Ctrl+C to stop.");
+    let signal_stop = stop.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        signal_stop.store(true, Ordering::SeqCst);
+    });
+
+    pipeline.await??;
+    print_written_files(&targets);
     Ok(())
 }
 
-fn print_written_files(targets: Vec<OutputTarget>) {
+impl SourceSpec {
+    fn into_stream(self) -> AudioStream {
+        match self {
+            Self::Device(name) => AudioStream::from_device(name),
+            Self::File(path) => AudioStream::from_file(path),
+        }
+    }
+}
+
+impl TargetSpec {
+    fn sink(&self) -> AudioSink {
+        match self {
+            Self::Device(name) => AudioSink::to_device(name.clone()),
+            Self::File(path) => AudioSink::to_file(path.clone()),
+        }
+    }
+}
+
+fn print_written_files(targets: &[TargetSpec]) {
     for target in targets {
-        if let OutputTarget::File(path) = target {
+        if let TargetSpec::File(path) = target {
             eprintln!("Wrote audio file: {}", path.display());
         }
     }
@@ -229,15 +269,17 @@ mod tests {
     fn parse_pipe_device_to_device() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:d".to_string(),
-            "-o:d".to_string(),
+            "-i".to_string(),
+            "device".to_string(),
+            "-o".to_string(),
+            "device".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::Device(None));
-                assert_eq!(targets, vec![OutputTarget::Device(None)]);
+                assert_eq!(source, SourceSpec::Device(None));
+                assert_eq!(targets, vec![TargetSpec::Device(None)]);
             }
             _ => panic!("expected pipe command"),
         }
@@ -247,19 +289,17 @@ mod tests {
     fn parse_pipe_device_to_file() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:d".to_string(),
-            "-o:f".to_string(),
-            "record.wav".to_string(),
+            "-i".to_string(),
+            "device".to_string(),
+            "-o".to_string(),
+            "file:record.wav".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::Device(None));
-                assert_eq!(
-                    targets,
-                    vec![OutputTarget::File(PathBuf::from("record.wav"))]
-                );
+                assert_eq!(source, SourceSpec::Device(None));
+                assert_eq!(targets, vec![TargetSpec::File(PathBuf::from("record.wav"))]);
             }
             _ => panic!("expected pipe command"),
         }
@@ -269,16 +309,17 @@ mod tests {
     fn parse_pipe_file_to_device() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:f".to_string(),
-            "music.wav".to_string(),
-            "-o:d".to_string(),
+            "-i".to_string(),
+            "file:music.wav".to_string(),
+            "-o".to_string(),
+            "device".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::File(PathBuf::from("music.wav")));
-                assert_eq!(targets, vec![OutputTarget::Device(None)]);
+                assert_eq!(source, SourceSpec::File(PathBuf::from("music.wav")));
+                assert_eq!(targets, vec![TargetSpec::Device(None)]);
             }
             _ => panic!("expected pipe command"),
         }
@@ -288,17 +329,17 @@ mod tests {
     fn parse_pipe_file_to_file() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:f".to_string(),
-            "a.wav".to_string(),
-            "-o:f".to_string(),
-            "b.mp3".to_string(),
+            "-i".to_string(),
+            "file:a.wav".to_string(),
+            "-o".to_string(),
+            "file:b.mp3".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::File(PathBuf::from("a.wav")));
-                assert_eq!(targets, vec![OutputTarget::File(PathBuf::from("b.mp3"))]);
+                assert_eq!(source, SourceSpec::File(PathBuf::from("a.wav")));
+                assert_eq!(targets, vec![TargetSpec::File(PathBuf::from("b.mp3"))]);
             }
             _ => panic!("expected pipe command"),
         }
@@ -308,19 +349,19 @@ mod tests {
     fn parse_pipe_named_devices() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:d".to_string(),
-            "usb-mic".to_string(),
-            "-o:d".to_string(),
-            "airpods".to_string(),
+            "-i".to_string(),
+            "device:usb-mic".to_string(),
+            "-o".to_string(),
+            "device:airpods".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::Device(Some("usb-mic".to_string())));
+                assert_eq!(source, SourceSpec::Device(Some("usb-mic".to_string())));
                 assert_eq!(
                     targets,
-                    vec![OutputTarget::Device(Some("airpods".to_string()))]
+                    vec![TargetSpec::Device(Some("airpods".to_string()))]
                 );
             }
             _ => panic!("expected pipe command"),
@@ -331,23 +372,23 @@ mod tests {
     fn parse_pipe_multiple_outputs() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:d".to_string(),
-            "mic".to_string(),
-            "-o:d".to_string(),
-            "speaker".to_string(),
-            "-o:f".to_string(),
-            "record.wav".to_string(),
+            "-i".to_string(),
+            "device:mic".to_string(),
+            "-o".to_string(),
+            "device:speaker".to_string(),
+            "-o".to_string(),
+            "file:record.wav".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::Device(Some("mic".to_string())));
+                assert_eq!(source, SourceSpec::Device(Some("mic".to_string())));
                 assert_eq!(
                     targets,
                     vec![
-                        OutputTarget::Device(Some("speaker".to_string())),
-                        OutputTarget::File(PathBuf::from("record.wav")),
+                        TargetSpec::Device(Some("speaker".to_string())),
+                        TargetSpec::File(PathBuf::from("record.wav")),
                     ]
                 );
             }
@@ -357,51 +398,86 @@ mod tests {
 
     #[test]
     fn parse_pipe_missing_source_fails() {
-        let err = parse_command(vec!["pipe".to_string(), "-o:d".to_string()])
-            .expect_err("missing source should fail");
+        let err = parse_command(vec![
+            "pipe".to_string(),
+            "-o".to_string(),
+            "device".to_string(),
+        ])
+        .expect_err("missing source should fail");
 
-        assert_eq!(err.to_string(), "pipe requires -i:d or -i:f");
+        assert_eq!(
+            err.to_string(),
+            "pipe requires -i file:<path> or -i device[:name]"
+        );
     }
 
     #[test]
     fn parse_pipe_missing_target_fails() {
         let err = parse_command(vec![
             "pipe".to_string(),
-            "-i:f".to_string(),
-            "input.wav".to_string(),
+            "-i".to_string(),
+            "file:input.wav".to_string(),
         ])
         .expect_err("missing target should fail");
 
-        assert_eq!(err.to_string(), "pipe requires at least one -o:d or -o:f");
+        assert_eq!(
+            err.to_string(),
+            "pipe requires at least one -o file:<path> or -o device[:name]"
+        );
     }
 
     #[test]
     fn parse_pipe_unknown_flag_fails() {
         let err = parse_command(vec![
             "pipe".to_string(),
-            "-i:x".to_string(),
-            "input.wav".to_string(),
-            "-o:d".to_string(),
+            "-x".to_string(),
+            "file:input.wav".to_string(),
+            "-o".to_string(),
+            "device".to_string(),
         ])
         .expect_err("unknown flag should fail");
 
-        assert_eq!(err.to_string(), "unexpected argument: -i:x");
+        assert_eq!(err.to_string(), "unexpected argument: -x");
     }
 
     #[test]
     fn parse_pipe_device_with_name_then_flag() {
         let command = parse_command(vec![
             "pipe".to_string(),
-            "-i:d".to_string(),
-            "my-mic".to_string(),
-            "-o:d".to_string(),
+            "-i".to_string(),
+            "device:my-mic".to_string(),
+            "-o".to_string(),
+            "device".to_string(),
         ])
         .expect("parse command");
 
         match command {
             Command::Pipe { source, targets } => {
-                assert_eq!(source, InputSource::Device(Some("my-mic".to_string())));
-                assert_eq!(targets, vec![OutputTarget::Device(None)]);
+                assert_eq!(source, SourceSpec::Device(Some("my-mic".to_string())));
+                assert_eq!(targets, vec![TargetSpec::Device(None)]);
+            }
+            _ => panic!("expected pipe command"),
+        }
+    }
+
+    #[test]
+    fn parse_pipe_windows_file_path() {
+        let command = parse_command(vec![
+            "pipe".to_string(),
+            "-i".to_string(),
+            "file:E:\\music.wav".to_string(),
+            "-o".to_string(),
+            "file:E:\\record.wav".to_string(),
+        ])
+        .expect("parse command");
+
+        match command {
+            Command::Pipe { source, targets } => {
+                assert_eq!(source, SourceSpec::File(PathBuf::from("E:\\music.wav")));
+                assert_eq!(
+                    targets,
+                    vec![TargetSpec::File(PathBuf::from("E:\\record.wav"))]
+                );
             }
             _ => panic!("expected pipe command"),
         }
