@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::*;
+use crate::*;
 
 pub(crate) fn list() -> Result<AudioDeviceList> {
     let default_input_name = InputDevice::default().and_then(|input| input.name()).ok();

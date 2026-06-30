@@ -8,10 +8,9 @@ use futures::Sink;
 use symphonia::core::errors::Error as SymphoniaError;
 use tokio_stream::Stream;
 
-#[path = "lib/device.rs"]
-mod device;
-#[path = "lib/file.rs"]
-mod file;
+mod backends;
+
+use backends::{device, file};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
