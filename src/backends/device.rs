@@ -40,7 +40,7 @@ pub(crate) fn stream(
     sample_rate: Option<u32>,
     channels: Option<u16>,
     buffer_size: Option<u32>,
-) -> Result<(BoxedAudioStream, cpal::Stream)> {
+) -> Result<(BoxedAudioStream, StreamControl)> {
     let input = match device_name {
         Some(device_name) => InputDevice::named(device_name)?,
         None => InputDevice::default()?,
@@ -74,7 +74,7 @@ pub(crate) fn stream(
         Box::pin(DeviceAudioStream {
             frames: UnboundedReceiverStream::new(receiver),
         }),
-        stream,
+        Box::new(DeviceStreamControl { stream }),
     ))
 }
 
@@ -173,6 +173,20 @@ impl OutputDevice {
 
 struct DeviceAudioStream {
     frames: UnboundedReceiverStream<Result<AudioFrame>>,
+}
+
+struct DeviceStreamControl {
+    stream: cpal::Stream,
+}
+
+impl AudioStreamControl for DeviceStreamControl {
+    fn start(&self) -> Result<()> {
+        self.stream.play().map_err(AudioError::from)
+    }
+
+    fn stop(&self) -> Result<()> {
+        self.stream.pause().map_err(AudioError::from)
+    }
 }
 
 impl Unpin for DeviceAudioStream {}
@@ -549,4 +563,40 @@ fn u32_to_f32(sample: u32) -> f32 {
 
 fn u64_to_f32(sample: u64) -> f32 {
     sample as f32 / u64::MAX as f32 * 2.0 - 1.0
+}
+
+impl From<cpal::DeviceNameError> for AudioError {
+    fn from(error: cpal::DeviceNameError) -> Self {
+        Self::DeviceName(error.to_string())
+    }
+}
+
+impl From<cpal::DevicesError> for AudioError {
+    fn from(error: cpal::DevicesError) -> Self {
+        Self::Devices(error.to_string())
+    }
+}
+
+impl From<cpal::DefaultStreamConfigError> for AudioError {
+    fn from(error: cpal::DefaultStreamConfigError) -> Self {
+        Self::DefaultStreamConfig(error.to_string())
+    }
+}
+
+impl From<cpal::BuildStreamError> for AudioError {
+    fn from(error: cpal::BuildStreamError) -> Self {
+        Self::BuildStream(error.to_string())
+    }
+}
+
+impl From<cpal::PlayStreamError> for AudioError {
+    fn from(error: cpal::PlayStreamError) -> Self {
+        Self::PlayStream(error.to_string())
+    }
+}
+
+impl From<cpal::PauseStreamError> for AudioError {
+    fn from(error: cpal::PauseStreamError) -> Self {
+        Self::PlayStream(error.to_string())
+    }
 }

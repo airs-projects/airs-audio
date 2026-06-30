@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use cpal::traits::StreamTrait;
 use futures::Sink;
-use symphonia::core::errors::Error as SymphoniaError;
 use tokio_stream::Stream;
 
 mod backends;
@@ -19,16 +17,22 @@ pub fn version() -> &'static str {
 pub type Result<T> = std::result::Result<T, AudioError>;
 pub type BoxedAudioStream = Pin<Box<dyn Stream<Item = Result<AudioFrame>> + Send>>;
 pub type BoxedAudioSink = Pin<Box<dyn Sink<AudioFrame, Error = AudioError> + Send>>;
+type StreamControl = Box<dyn AudioStreamControl + Send>;
 type StreamOpener = Box<
     dyn FnOnce(
             Option<u32>,
             Option<u16>,
             Option<u32>,
-        ) -> Result<(BoxedAudioStream, Option<cpal::Stream>)>
+        ) -> Result<(BoxedAudioStream, Option<StreamControl>)>
         + Send,
 >;
 type SinkOpener =
     Box<dyn FnOnce(Option<u32>, Option<u16>, Option<u32>) -> Result<BoxedAudioSink> + Send>;
+
+trait AudioStreamControl {
+    fn start(&self) -> Result<()>;
+    fn stop(&self) -> Result<()>;
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioFrame {
@@ -72,54 +76,12 @@ pub enum AudioError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("audio decode error: {0}")]
-    Symphonia(String),
-}
-
-impl From<cpal::DeviceNameError> for AudioError {
-    fn from(error: cpal::DeviceNameError) -> Self {
-        Self::DeviceName(error.to_string())
-    }
-}
-
-impl From<cpal::DevicesError> for AudioError {
-    fn from(error: cpal::DevicesError) -> Self {
-        Self::Devices(error.to_string())
-    }
-}
-
-impl From<cpal::DefaultStreamConfigError> for AudioError {
-    fn from(error: cpal::DefaultStreamConfigError) -> Self {
-        Self::DefaultStreamConfig(error.to_string())
-    }
-}
-
-impl From<cpal::BuildStreamError> for AudioError {
-    fn from(error: cpal::BuildStreamError) -> Self {
-        Self::BuildStream(error.to_string())
-    }
-}
-
-impl From<cpal::PlayStreamError> for AudioError {
-    fn from(error: cpal::PlayStreamError) -> Self {
-        Self::PlayStream(error.to_string())
-    }
-}
-
-impl From<cpal::PauseStreamError> for AudioError {
-    fn from(error: cpal::PauseStreamError) -> Self {
-        Self::PlayStream(error.to_string())
-    }
+    Decode(String),
 }
 
 impl From<std::num::TryFromIntError> for AudioError {
     fn from(error: std::num::TryFromIntError) -> Self {
         Self::NumberConversion(error.to_string())
-    }
-}
-
-impl From<SymphoniaError> for AudioError {
-    fn from(error: SymphoniaError) -> Self {
-        Self::Symphonia(error.to_string())
     }
 }
 
@@ -143,7 +105,7 @@ pub struct AudioStream {
     channels: Option<u16>,
     buffer_size: Option<u32>,
     stream: Option<BoxedAudioStream>,
-    device_stream: Option<cpal::Stream>,
+    stream_control: Option<StreamControl>,
 }
 
 impl AudioStream {
@@ -155,7 +117,7 @@ impl AudioStream {
     pub fn from_device(device_name: Option<String>) -> Self {
         Self::new(Box::new(move |sample_rate, channels, buffer_size| {
             device::stream(device_name.as_deref(), sample_rate, channels, buffer_size)
-                .map(|(stream, device_stream)| (stream, Some(device_stream)))
+                .map(|(stream, control)| (stream, Some(control)))
         }))
     }
 
@@ -170,7 +132,7 @@ impl AudioStream {
             channels: None,
             buffer_size: None,
             stream: None,
-            device_stream: None,
+            stream_control: None,
         }
     }
 
@@ -192,8 +154,8 @@ impl AudioStream {
     /// Start the device stream (no-op for file sources).
     pub fn start(&mut self) -> Result<()> {
         self.ensure_stream();
-        if let Some(stream) = &self.device_stream {
-            stream.play().map_err(AudioError::from)
+        if let Some(control) = &self.stream_control {
+            control.start()
         } else {
             Ok(())
         }
@@ -201,8 +163,8 @@ impl AudioStream {
 
     /// Pause the device stream (no-op for file sources).
     pub fn stop(&mut self) -> Result<()> {
-        if let Some(stream) = &self.device_stream {
-            stream.pause().map_err(AudioError::from)
+        if let Some(control) = &self.stream_control {
+            control.stop()
         } else {
             Ok(())
         }
@@ -212,9 +174,9 @@ impl AudioStream {
         if self.stream.is_none() {
             let open = self.open.take().expect("audio stream opener is available");
             match open(self.sample_rate, self.channels, self.buffer_size) {
-                Ok((stream, device_stream)) => {
+                Ok((stream, stream_control)) => {
                     self.stream = Some(stream);
-                    self.device_stream = device_stream;
+                    self.stream_control = stream_control;
                 }
                 Err(error) => {
                     self.stream = Some(Box::pin(tokio_stream::iter(vec![Err(error)])));

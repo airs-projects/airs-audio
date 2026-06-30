@@ -464,3 +464,9 @@ fn opus_tags() -> Vec<u8> {
     data.extend_from_slice(&0_u32.to_le_bytes());
     data
 }
+
+impl From<SymphoniaError> for AudioError {
+    fn from(error: SymphoniaError) -> Self {
+        Self::Decode(error.to_string())
+    }
+}
